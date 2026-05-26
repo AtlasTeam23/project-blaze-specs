@@ -26,10 +26,11 @@ env_vars_to_use_in_edge_functions:
   GOOGLE_ADS_REFRESH_TOKEN
   GOOGLE_ADS_LOGIN_CUSTOMER_ID   # = 7990784116 (MCC)
   ANTHROPIC_API_KEY              # AI summaries
-  OPENAI_API_KEY                 # fallback model
+  OPENAI_API_KEY                 # fallback model (optional — skip if leaning lean)
+  RESEND_API_KEY                 # outbound email (key labeled "Project Blaze on Leadquik")
 ```
 
-Email outbound: **existing Lovable Emails pipeline**, sender `noreply@leadquik.com`. (Standing memory rule.)
+Email outbound: **Resend** via the `RESEND_API_KEY` secret (key labeled "Project Blaze on Leadquik" in Supabase Secrets). Sender stays `noreply@leadquik.com` — must be a verified domain in Resend. Chosen for VPS portability; Lovable Emails would lock us to the Lovable platform.
 
 ---
 
@@ -204,7 +205,7 @@ WHERE campaign.name = 'Georgia May Leads 2026 Abhinav'
 4. On failure (timeout, rate limit, 5xx), retry with **OpenAI GPT-4o**
 5. On total failure, send a templated non-AI summary so the operator still gets a Monday email
 6. INSERT into `marketing_ai_summaries` (business_id, generated_at, date_range_start, date_range_end, trigger, summary_markdown, highlight_items, model)
-7. Send email via existing Lovable Emails pipeline from `noreply@leadquik.com`. Subject: `🪵 Weekly Marketing Summary — {{business.name}} — {{date_range.start}}`
+7. Send email via Resend (RESEND_API_KEY) from `noreply@leadquik.com`. Use the `resend` npm SDK via esm.sh in the Edge Function. Subject: `🪵 Weekly Marketing Summary — {{business.name}} — {{date_range.start}}`
 
 **SummaryInput TypeScript schema**:
 ```ts
@@ -392,7 +393,7 @@ The operator can paste any of these via clipboard if you want them in your conte
   - Triggers `generate_ai_summary` Edge Function
   - Returns a populated summary in **< 30 seconds**
   - Saves to `marketing_ai_summaries`
-  - Sends email via Lovable Emails from `noreply@leadquik.com` to `david@hardwood-guys.com`
+  - Sends email via Resend from `noreply@leadquik.com` to `david@hardwood-guys.com`
 - [ ] Emailed summary contains specific numbers from the GA campaign (spend, top keywords, wasted terms) — not generic boilerplate
 - [ ] **No data leakage**: if logged in as `david@woodtilepros.com` viewing CT/NY, no GA data is visible anywhere; `/marketing` 404s (CT/NY still not seeded into Blaze)
 - [ ] All mutations done via service role inside Edge Functions; nothing client-side touches the developer token
