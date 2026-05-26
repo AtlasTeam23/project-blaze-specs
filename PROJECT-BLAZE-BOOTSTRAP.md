@@ -16,7 +16,7 @@ LeadQuik already has:
 - An AI receptionist (Retell + Twilio) capturing inbound calls and texts
 - `leads`, `calls`, `bookings`, `appointments` tables — these already store `gclid`, `utm_*`, `referrer`, and `landing_path` (do not duplicate this data into Blaze)
 - Stripe billing
-- **Lovable Emails pipeline** for all outbound transactional mail. Sender is `noreply@leadquik.com` (standing memory rule — do not split sender subdomains). SendGrid in the project is **Inbound Parse only** — do not send through it.
+- **Resend** for all outbound transactional mail (via `RESEND_API_KEY` secret labeled "Project Blaze on Leadquik"). Sender is `noreply@leadquik.com` (must be a verified domain in Resend). Chosen over Lovable Emails for VPS portability. SendGrid in the project is **Inbound Parse only** — do not send through it.
 
 **Blaze adds a new nav tab** at `/marketing` and a small number of new tables prefixed `marketing_`. Do not modify or rename existing LeadQuik tables.
 
@@ -574,20 +574,22 @@ create policy marketing_<table>_business_access on marketing_<table>
 | `sync_ads_daily` | cron `0 3 * * *` ET | For each unique `(external_id)` in `marketing_accounts` of type=google_ads, fetch **once** and partition results by campaign_id when writing per-business rows (Section 1 note on GA+CT/NY sharing customer_id). Upsert daily metrics, keyword perf, search terms. |
 | `sync_gmb_daily` | cron `30 3 * * *` ET | For each GMB account: insights, new reviews, photo cadence. Invoke `match_review_to_call` for each new review. **No-op gracefully if GMB API approval not yet granted** — return early with status 'awaiting_api_approval'. |
 | `seo_scan_weekly` | cron `0 7 * * 0` ET (Sunday 7am) | Crawl each linked website, score, persist. Raw data goes to Supabase Storage. |
-| `generate_ai_summary` | cron `30 7 * * 1` (Monday) + on-demand HTTP POST | Compose structured prompt, call Claude, store summary, **send email via existing Lovable Emails pipeline** (sender `noreply@leadquik.com`). Body `{business_id, force: true}` triggers manual push. |
+| `generate_ai_summary` | cron `30 7 * * 1` (Monday) + on-demand HTTP POST | Compose structured prompt, call Claude, store summary, **send email via Resend** (sender `noreply@leadquik.com`, key `RESEND_API_KEY` labeled "Project Blaze on Leadquik"). Body `{business_id, force: true}` triggers manual push. |
 | `generate_daily_summary` | cron `0 8 * * *` ET, Internal Elite only | Same as weekly but covers last 24h. Filters to `marketing_business_settings.service_tier = 'internal_elite'`. |
 | `apply_recommendation` | HTTP POST from UI | Validate user permission. Execute the action via the appropriate API (Ads or GMB). Write audit log. Mark recommendation applied. |
-| `detect_anomalies` | cron `0 4 * * *` ET (daily) | Compare current 7d to prior 7d per account. Fire alerts via configured channel (Lovable Emails for email, Twilio for SMS). **Hourly frequency available as opt-in via `marketing_business_settings.features_enabled.hourly_anomaly_check = true`.** |
+| `detect_anomalies` | cron `0 4 * * *` ET (daily) | Compare current 7d to prior 7d per account. Fire alerts via configured channel (Resend for email, Twilio for SMS). **Hourly frequency available as opt-in via `marketing_business_settings.features_enabled.hourly_anomaly_check = true`.** |
 | `match_review_to_call` | Invoked inline by `sync_gmb_daily` on each new review | Match reviewer name + posted_at to LeadQuik calls within 30d prior. Update review row. |
 | `auto_request_review` | cron `*/15 * * * *` (every 15 min) | Poll `bookings` (or equivalent existing LeadQuik table) for rows where `created_at` is between `now() - 25 hours` and `now() - 23 hours` AND no review request sent. Send SMS via Twilio with the customer's GMB review link. **Polling pattern, not a DB trigger** — LeadQuik doesn't expose a booking-created event hook. |
 | `upload_leadquik_conversion` | Invoked from existing LeadQuik booking-flow code (add one line) OR pg_cron polling fallback | Pulls gclid from the source row's existing column. Constructs full conversionAction resource name. POSTs to Ads `uploadClickConversions`. Writes to `marketing_conversion_uploads`. See §14.12 for full pattern. |
 | `public_grader_scan` | HTTP POST from grader.leadquik.com | Crawl URL, optionally score Ads if OAuth token provided, persist to `grader_scans`, return shareable slug. Service role only (no auth). |
 
-### Outbound email — use the existing Lovable Emails pipeline
+### Outbound email — use Resend
 
-All email sends in Blaze use the existing LeadQuik transactional mailer:
-- From: **`noreply@leadquik.com`** (standing memory rule — single sender domain, do not split SPF/DKIM by introducing a second sender subdomain)
-- Pipeline: existing Lovable Emails queue (same pattern the rest of LeadQuik already uses for transactional sends)
+All email sends in Blaze use the Resend API:
+- From: **`noreply@leadquik.com`** (verified domain in Resend — keeps consistent sender, no SPF/DKIM split)
+- Secret: `RESEND_API_KEY` (labeled "Project Blaze on Leadquik" in Supabase Secrets)
+- Library: `resend` npm SDK via esm.sh in Edge Functions (Deno-compatible)
+- Chosen for VPS portability — Resend works anywhere, Lovable Emails is platform-locked.
 - SendGrid is **Inbound Parse only** — do not send through it.
 
 ---
@@ -833,7 +835,7 @@ If GMB data is null, do not mention GMB in the summary — the integration is pe
 
 ### Email delivery
 
-Via the existing Lovable Emails pipeline, sender `noreply@leadquik.com`. Subject: `🪵 Weekly Marketing Summary — {{business.name}} — {{date_range.start}}`.
+Via Resend (RESEND_API_KEY), sender `noreply@leadquik.com`. Subject: `🪵 Weekly Marketing Summary — {{business.name}} — {{date_range.start}}`.
 
 ---
 
@@ -1159,7 +1161,7 @@ GMB_REFRESH_TOKEN                              # if separate from Ads token
 ANTHROPIC_API_KEY                              # AI summaries
 OPENAI_API_KEY                                 # fallback only
 
-# (no separate email API key — use the existing Lovable Emails pipeline already wired into LeadQuik)
+RESEND_API_KEY                                 # outbound email (labeled "Project Blaze on Leadquik" in Supabase Secrets)
 
 TWILIO_ACCOUNT_SID                             # review-request SMS
 TWILIO_AUTH_TOKEN
@@ -1185,7 +1187,7 @@ For new external customers joining Blaze:
 - **Google Ads**: REST via `fetch`. The `google-ads-api` npm package isn't Deno-compatible.
 - **Business Profile**: `googleapis` via esm.sh: `import { google } from "https://esm.sh/googleapis@131"`
 - **Anthropic**: `@anthropic-ai/sdk` via esm.sh
-- **Email**: existing Lovable Emails pipeline (sender `noreply@leadquik.com`) — do not introduce Resend or any other sender
+- **Email**: Resend SDK (`resend` npm via esm.sh in Edge Functions). Sender always `noreply@leadquik.com` — must be verified in Resend.
 - **Twilio**: REST via `fetch`
 
 **Lovable React frontend (Node):**
